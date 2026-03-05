@@ -114,6 +114,9 @@
       <span class="circle-float-btn" id="show-btn">
         <img id="show-img" class="btn-img" src="img/ic_iconInfo.png"/>
       </span>
+      <span class="circle-float-btn" id="table-btn">
+        <i class="fa fa-table btn-img" style="font-size: 50px; line-height: 50px;"></i>
+      </span>
     </div>
   </div>
 </section>
@@ -226,6 +229,7 @@
           <br>"L" : Leaky Terminators can only appear at end of design.
           <br>"S" : Design must start with Part. "E" : Design must end with Part.
           <br>"goldbar" : GOLDBAR to include.
+          <br>"all" : All available rules in CSV.
         </p>
         <br>
         <a href="/data/goldbarGenerator/example.csv" download class="example-link">Download Example GOLDBAR Generator CSV</a>
@@ -308,17 +312,10 @@
                         knox.setGOLDBARTab(data.goldbar, data.categories, outputSpacePrefix);
 
                         Object.entries(data.goldbar).forEach(([key, goldbar]) => {
-                        let specification = goldbar;
                         //replace all spaces and special characters for SBOL
                         let designName = outputSpacePrefix + key;
                         designName = designName.replace(/[^A-Z0-9]/ig, "_");
                         rules.push(designName);
-                        
-                        try {
-                          knox.submitGoldbar(specification, categories, designName, groupID, weight);
-                        } catch {
-                          error = error + "Error Submitting";
-                        }
 
                         });
 
@@ -486,6 +483,8 @@
   <a id="rename-design-space-tooltip">Rename Design</a>
 
   <a id="show-sbol-tooltips">Show SBOL Tooltips</a>
+
+  <a id="table-tooltip">Open Purity Table</a>
 </div>
 
 <footer>
@@ -502,8 +501,8 @@
   <script type="module" src="js/knox.js"></script>
   <script type="module" src="js/target.js"></script>
   <script type="module" src="js/endpoints.js"></script>
-  <script type="module" src="js/simplifyOperators.js"></script>
-  <script src="https://imparse.org/lib/imparse.js"></script>
+  <!--script type="module" src="js/simplifyOperators.js"></script-->
+  <!--script src="https://imparse.org/lib/imparse.js"></script-->
 
   <script type="module" src="js/use-cases/rebeccamycin.js"></script>
   <script type="module" src="js/use-cases/cello-AND-circuits.js"></script>

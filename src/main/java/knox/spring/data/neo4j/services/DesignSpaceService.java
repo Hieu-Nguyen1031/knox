@@ -76,6 +76,9 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.Collection;
 
 @Service
@@ -380,6 +383,45 @@ public class DesignSpaceService {
 		}
 		return spaces;
 	}
+
+	private ArrayList<NodeSpace> loadSpacesParallel(ArrayList<String> inputSpaceIDs) {
+		int size = inputSpaceIDs.size();
+		
+		if (size <= 3) {
+			return loadSpaces(inputSpaceIDs);
+		}
+		
+		// Use fixed thread pool to limit concurrent DB connections
+		int numThreads = Math.min(size, Runtime.getRuntime().availableProcessors() * 2);
+		ExecutorService executor = Executors.newFixedThreadPool(numThreads);
+		
+		try {
+			// Create futures for all load operations
+			List<CompletableFuture<DesignSpace>> futures = new ArrayList<>(size);
+			
+			for (String inputSpaceID : inputSpaceIDs) {
+				CompletableFuture<DesignSpace> future = CompletableFuture.supplyAsync(() -> {
+					DesignSpace space = loadDesignSpace(inputSpaceID);
+					if (space == null) {
+						throw new DesignSpaceNotFoundException("Input space with ID " + inputSpaceID + " not found.");
+					}
+					return space;
+				}, executor);
+				futures.add(future);
+			}
+			
+			// Wait for all to complete and collect results
+			ArrayList<NodeSpace> spaces = new ArrayList<>(size);
+			for (CompletableFuture<DesignSpace> future : futures) {
+				spaces.add(future.join()); // Throws exception if any failed
+			}
+			
+			return spaces;
+			
+		} finally {
+			executor.shutdown();
+		}
+	}
     
     public void mergeBranches(String targetSpaceID, List<String> inputBranchIDs, 
     		int tolerance, int weightTolerance, Set<String> roles) {
@@ -609,7 +651,7 @@ public class DesignSpaceService {
     	
     	for (BufferedReader designReader : designReaders) {
     		try {
-    			csvSpaces.addAll(processCSVDesigns(designReader, outputSpacePrefix, compIDToRole, weights, multipleWeights, weightCSV, multipleWeightsCSV));
+    			csvSpaces.addAll(processCSVDesigns(designReader, outputSpacePrefix, groupID, compIDToRole, weights, multipleWeights, weightCSV, multipleWeightsCSV));
     		} catch (IOException e) {
     			e.printStackTrace();
     		} finally {
@@ -640,15 +682,12 @@ public class DesignSpaceService {
     			saveDesignSpace(outputSpace);
 
     		}  else {
-				for (DesignSpace csvSpace : csvSpaces) {
-					csvSpace.setGroupID(groupID);
-					saveDesignSpace(csvSpace);
-				}
+				saveDesignSpacesParallel(csvSpaces);
 			}
     	}
     }
     
-    public List<DesignSpace> processCSVDesigns(BufferedReader csvReader, String outputSpacePrefix, 
+    public List<DesignSpace> processCSVDesigns(BufferedReader csvReader, String outputSpacePrefix, String groupID,
     		HashMap<String, String> compIDToRole, List<String> defaultWeight, List<List<String>> multipleWeights, Boolean weightCSV, Boolean multipleWeightsCSV) throws IOException {
     	List<DesignSpace> csvSpaces = new LinkedList<DesignSpace>();
     	
@@ -678,7 +717,7 @@ public class DesignSpaceService {
 				j++;
 				designNumber++;
 
-				DesignSpace outputSpace = new DesignSpace(outputSpacePrefix + "_design_" + designNumber);
+				DesignSpace outputSpace = new DesignSpace(outputSpacePrefix + "_design_(" + designNumber + ")", groupID);
 
 				Node outputStart = outputSpace.createStartNode();
 
@@ -781,6 +820,60 @@ public class DesignSpaceService {
 		return MultipleWeights;
 	}
 
+	private void saveDesignSpacesParallel(List<DesignSpace> spaces) {
+		int size = spaces.size();
+		
+		// For small lists, sequential is fine
+		if (size <= 5) {
+			System.out.println("Saving " + size + " design spaces sequentially...");
+			for (DesignSpace space : spaces) {
+				saveDesignSpace(space);
+			}
+			return;
+		}
+		
+		System.out.println("Saving " + size + " design spaces in parallel...");
+		long startTime = System.currentTimeMillis();
+		
+		// Limit concurrent DB writes to avoid overwhelming the database
+		int numThreads = Math.min(size, Runtime.getRuntime().availableProcessors() * 2);
+		ExecutorService executor = Executors.newFixedThreadPool(numThreads);
+		
+		java.util.concurrent.atomic.AtomicInteger completed = new java.util.concurrent.atomic.AtomicInteger(0);
+		java.util.concurrent.atomic.AtomicInteger failed = new java.util.concurrent.atomic.AtomicInteger(0);
+		
+		try {
+			List<CompletableFuture<Void>> futures = new ArrayList<>(size);
+			
+			for (DesignSpace space : spaces) {
+				CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+					try {
+						saveDesignSpace(space);
+						
+						int done = completed.incrementAndGet();
+						if (done % 100 == 0 || done == size) {
+							System.out.printf("Saved %d/%d spaces (%.1f%%)%n", done, size, done * 100.0 / size);
+						}
+					} catch (Exception e) {
+						failed.incrementAndGet();
+						System.err.println("Failed to save space: " + space.getSpaceID() + " - " + e.getMessage());
+					}
+				}, executor);
+				futures.add(future);
+			}
+			
+			// Wait for all to complete
+			CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+			
+		} finally {
+			executor.shutdown();
+		}
+		
+		long elapsed = System.currentTimeMillis() - startTime;
+		System.out.printf("Saved %d spaces in %.1f seconds (%.1f spaces/sec), %d failed%n",
+			completed.get(), elapsed / 1000.0, completed.get() / (elapsed / 1000.0), failed.get());
+	}
+
 	public void importSBOL(List<SBOLDocument> sbolDocs, String outputSpaceID, String groupID, Double weight)
 			throws SBOLValidationException, IOException, SBOLConversionException, SBOLException {
 		SBOLConversion sbolConv = new SBOLConversion();
@@ -868,8 +961,8 @@ public class DesignSpaceService {
 		//designSpace.printAllEdges();
 	}
 
-	public void importGoldbar(JSONObject goldbar, JSONObject categories, String outputSpacePrefix, 
-			String groupID, Double weight, Boolean verbose) throws JSONException {
+	public void importGoldbar(String goldbar, JSONObject categories, String outputSpacePrefix, 
+			String groupID, Double weight, Boolean verbose) throws JSONException, IllegalArgumentException {
 
 		GoldbarConversion goldbarConversion = new GoldbarConversion(goldbar, categories, weight, verbose);
 
@@ -884,8 +977,15 @@ public class DesignSpaceService {
 		saveDesignSpace(outputSpace);
 	}
 
-	public Map<String, Object> goldbarGeneration(ArrayList<String> rules, InputStream inputCSVStream, 
-			ArrayList<String> lengths, String outputSpacePrefix, Boolean verify, String direction, Boolean verbose) {
+	public Map<String, Object> goldbarGeneration(
+			ArrayList<String> rules, 
+			InputStream inputCSVStream, 
+			ArrayList<String> lengths, 
+			String outputSpacePrefix, 
+			String groupID,
+			Boolean verify, 
+			String direction, 
+			Boolean verbose) {
 		
 		Map<String, Object> goldbarAndCategories = new HashMap<>();
 
@@ -908,17 +1008,19 @@ public class DesignSpaceService {
 		goldbarAndCategories.put("goldbar", goldbar);
 		goldbarAndCategories.put("categories", goldbarGeneration.getCategoriesString());
 
+		importGoldbarsParallel(goldbar, goldbarGeneration.getCategories(), outputSpacePrefix, groupID, verbose);
+
 		return goldbarAndCategories;
 	}
 
 	public Map<String, Map<String, Object>> ruleEvaluation(String evaluationName, ArrayList<String> designSpaceIDs, String ruleGroupID,
-			ArrayList<Integer> designLabels, ArrayList<Double> designScores, String labelingMethod) {
+			ArrayList<Integer> designLabels, ArrayList<Double> designScores, String labelingMethod) throws RuntimeException {
 		
 		ArrayList<String> ruleSpaceIDs = new ArrayList<>(getGroupSpaceIDs(ruleGroupID));
 		
 		System.out.println("Loading Spaces...");
-		ArrayList<NodeSpace> designSpaces = loadSpaces(designSpaceIDs);
-		ArrayList<NodeSpace> ruleSpaces = loadSpaces(ruleSpaceIDs);
+		ArrayList<NodeSpace> designSpaces = loadSpacesParallel(designSpaceIDs);
+		ArrayList<NodeSpace> ruleSpaces = loadSpacesParallel(ruleSpaceIDs);
 		System.out.println("Spaces Loaded.");
 
 		// Populate design scores if not provided
@@ -930,13 +1032,101 @@ public class DesignSpaceService {
 		}
 
 		RuleEvaluation ruleEvaluation = new RuleEvaluation(evaluationName, ruleSpaceIDs, designSpaceIDs, designLabels, designScores, ruleSpaces, designSpaces, labelingMethod);
-		Map<String, Map<String, Object>> ruleResults = ruleEvaluation.getEvaluationResults();
+		Map<String, Map<String, Object>> evaluationResults = ruleEvaluation.getEvaluationResults();
 		System.out.println("Rule Evaluation Completed.");
 
 		saveRuleEvaluation(ruleEvaluation);
 		System.out.println("Rule Evaluation Saved.\n");
 
-		return ruleResults;
+		return evaluationResults;
+	}
+
+	private void importGoldbarsParallel(
+			Map<String, String> goldbar, 
+			JSONObject categories, 
+			String outputSpacePrefix, 
+			String groupID, 
+			Boolean verbose) {
+
+		int size = goldbar.size();
+		
+		// For small lists, sequential is fine
+		if (size <= 5) {
+			for (String key : goldbar.keySet()) {
+				importGoldbar(goldbar.get(key), categories, outputSpacePrefix + key, groupID, 0.0, verbose);
+			}
+			return;
+		}
+		
+		System.out.println("Importing " + size + " goldbars in parallel...");
+		long startTime = System.currentTimeMillis();
+		
+		// Limit concurrent operations
+		int numThreads = Math.min(size, Runtime.getRuntime().availableProcessors() * 2);
+		ExecutorService executor = Executors.newFixedThreadPool(numThreads);
+		
+		java.util.concurrent.atomic.AtomicInteger completed = new java.util.concurrent.atomic.AtomicInteger(0);
+		java.util.concurrent.atomic.AtomicInteger failed = new java.util.concurrent.atomic.AtomicInteger(0);
+		
+		// Convert to list for easier parallel processing
+		List<String> keys = new ArrayList<>(goldbar.keySet());
+		
+		try {
+			List<CompletableFuture<Void>> futures = new ArrayList<>(size);
+			
+			for (String key : keys) {
+				CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+					try {
+						importGoldbar(goldbar.get(key), categories, outputSpacePrefix + key, groupID, 0.0, verbose);
+						
+						int done = completed.incrementAndGet();
+						if (done % 50 == 0 || done == size) {
+							System.out.printf("Imported %d/%d goldbars (%.1f%%)%n", done, size, done * 100.0 / size);
+						}
+					} catch (Exception e) {
+						failed.incrementAndGet();
+						System.err.println("Failed to import goldbar: " + key + " - " + e.getMessage());
+					}
+				}, executor);
+				futures.add(future);
+			}
+			
+			// Wait for all to complete
+			CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+			
+		} finally {
+			executor.shutdown();
+		}
+		
+		long elapsed = System.currentTimeMillis() - startTime;
+		System.out.printf("Imported %d goldbars in %.1f seconds (%.1f goldbars/sec), %d failed%n",
+			completed.get(), elapsed / 1000.0, completed.get() / (elapsed / 1000.0), failed.get());
+	}
+
+	public void runRuleEvaluation(String evaluationName, ArrayList<String> designSpaceIDs, String ruleGroupID,
+			ArrayList<Integer> designLabels, ArrayList<Double> designScores, String labelingMethod) throws RuntimeException {
+		
+		ArrayList<String> ruleSpaceIDs = new ArrayList<>(getGroupSpaceIDs(ruleGroupID));
+		
+		System.out.println("Loading Spaces...");
+		ArrayList<NodeSpace> designSpaces = loadSpacesParallel(designSpaceIDs);
+		ArrayList<NodeSpace> ruleSpaces = loadSpacesParallel(ruleSpaceIDs);
+		System.out.println("Spaces Loaded.");
+
+		// Populate design scores if not provided
+		if (designScores.isEmpty()) {
+			System.out.println("Populating design scores...");
+			for (int i = 0; i < designSpaces.size(); i++) {
+				designScores.add(designSpaces.get(i).getAvgScoreofAllNonBlankEdges());
+			}
+		}
+
+		RuleEvaluation ruleEvaluation = new RuleEvaluation(evaluationName, ruleSpaceIDs, designSpaceIDs, designLabels, designScores, ruleSpaces, designSpaces, labelingMethod);
+		ruleEvaluation.runEvaluationParallel();
+		System.out.println("Rule Evaluation Completed.");
+
+		saveRuleEvaluation(ruleEvaluation);
+		System.out.println("Rule Evaluation Saved.\n");
 	}
 
 	public Map<String, Map<String, Object>> getEvaluationResults(String evaluationName) {
@@ -1100,6 +1290,10 @@ public class DesignSpaceService {
         return designSpaceRepository.listDesignSpaces();
     }
 
+	public Set<String> listRuleEvaluations() {
+		return ruleEvaluationRepository.getAllEvaluationNames();
+	}
+
     public void deleteDesignSpace(String targetSpaceID) {
 		System.out.println("\nDeleting Design Space: " + targetSpaceID + "\n");
         validateDesignSpaceOperator(targetSpaceID);
@@ -1111,12 +1305,7 @@ public class DesignSpaceService {
 
 	public void deleteDesignSpaceGroup(String groupID) {
 		System.out.println("\nDeleting Group: " + groupID + "\n");
-
-		List<String> spaceIDs = designSpaceRepository.listDesignSpaces(groupID);
-
-		for (String spaceID : spaceIDs) {
-			deleteDesignSpace(spaceID);
-		}
+		designSpaceRepository.deleteDesignSpacesByGroupID(groupID);
     }
 
 	public String renameDesignSpace(String targetSpaceID, String newSpaceID) throws DesignSpaceNotFoundException {
@@ -1478,13 +1667,6 @@ public class DesignSpaceService {
             targetSpace = designSpaceRepository.findById(graphId).orElse(null);
         }
 
-		// Set Tail Node for all Edges
-		for (Node node : targetSpace.getNodes()) {
-			for (Edge edge : node.getEdges()) {
-				edge.setTail(node);
-			}
-		}
-
 
 //      No version history
 //		for (Commit commit : targetSpace.getCommits()) {
@@ -1519,7 +1701,7 @@ public class DesignSpaceService {
 		Set<Integer> graphIDs = designSpaceRepository.getDesignSpaceGraphID(targetSpaceID);
 		
 		if (graphIDs.size() > 0) {
-			return new Long(graphIDs.iterator().next());
+			return (graphIDs.iterator().next()).longValue();
 		} else {
 			return null;
 		}
@@ -1529,7 +1711,7 @@ public class DesignSpaceService {
 		Set<Integer> graphIDs = ruleEvaluationRepository.getRuleEvaluationGraphID(targetEvaluationName);
 		
 		if (graphIDs.size() > 0) {
-			return new Long(graphIDs.iterator().next());
+			return (graphIDs.iterator().next()).longValue();
 		} else {
 			return null;
 		}
@@ -1677,7 +1859,7 @@ public class DesignSpaceService {
 	    		nodes.add(makeD3("nodeID", node.getNodeID()));
 	    	}
 	    	
-	    	nodeIndices.put(node.getNodeID(), new Integer(nodes.size()));
+	    	nodeIndices.put(node.getNodeID(), nodes.size());
 	    }
 	    
 	    for (Node node : space.getNodes()) {
@@ -1754,9 +1936,9 @@ public class DesignSpaceService {
 			v++;
 		}
 
-		System.out.println("\nSaving SpaceID: " + space.getSpaceID());
-		System.out.println("Number of Nodes: " + space.getNodes().size());
-		System.out.println("Number of Edges: " + space.getEdges().size());
+		//System.out.println("\nSaving SpaceID: " + space.getSpaceID());
+		//System.out.println("Number of Nodes: " + space.getNodes().size());
+		//System.out.println("Number of Edges: " + space.getEdges().size());
 
 		HashMap<String, Set<Edge>> nodeIDToEdges = space.mapNodeIDsToEdges();
 
@@ -1794,7 +1976,7 @@ public class DesignSpaceService {
 	}
 
 	public void saveRuleEvaluation(RuleEvaluation evaluation) {
-		//System.out.println("\nSaving Rule Evaluation: " + evaluation.getEvaluationName());
+		System.out.println("\nSaving Rule Evaluation: " + evaluation.getEvaluationName());
 		ruleEvaluationRepository.save(evaluation);
 	}
 
@@ -1818,7 +2000,7 @@ public class DesignSpaceService {
 		case "spacer":
 			return "http://identifiers.org/so/SO:0002223";
 		default:
-			return "http://knox.org/role/" + csvRole;
+			return csvRole;
 		}
 	}
 

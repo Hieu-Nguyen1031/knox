@@ -54,6 +54,9 @@ import org.json.JSONObject;
 import org.json.JSONException;
 
 import javassist.bytecode.ByteArray;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+
 
 /**
  * @author Nicholas Roehner
@@ -888,8 +891,8 @@ public class KnoxController {
 	}
 
 	@PostMapping("/goldbar/import")
-	public ResponseEntity<String> importGoldbar(@RequestParam(value = "goldbar", required = true) String goldbarString,
-			@RequestParam(value = "categories", required = true) String categoriesString,
+	public ResponseEntity<String> importGoldbar(@RequestParam(value = "goldbar", required = true) String goldbar,
+			@RequestParam(value = "categories", required = true) String categories,
 			@RequestParam(value = "outputSpaceID", required = true) String outputSpaceID,
 			@RequestParam(value = "groupID", required = false) String groupID,
 			@RequestParam(value = "weight", required = false) Double weight,
@@ -898,19 +901,19 @@ public class KnoxController {
 		if (verbose) {
 			System.out.println();		
 			System.out.println("GOLDBAR:");
-			System.out.println(goldbarString);
+			System.out.println(goldbar);
 			System.out.println();
 			System.out.println("Categories:");
-			System.out.println(categoriesString);
+			System.out.println(categories);
 		}
 		
 		try{
-			JSONObject goldbar = new JSONObject(goldbarString);
-			JSONObject categories = new JSONObject(categoriesString);
-			designSpaceService.importGoldbar(goldbar, categories, outputSpaceID, groupID, weight, verbose);
 
-		} catch (JSONException e) {
-			e.printStackTrace();
+			JSONObject categoriesObj = new JSONObject(categories);
+			designSpaceService.importGoldbar(goldbar, categoriesObj, outputSpaceID, groupID, weight, verbose);
+
+		} catch (JSONException | IllegalArgumentException ex) {
+			return new ResponseEntity<String>("{\"message\": \"" + ex.getMessage() + "\"}", HttpStatus.BAD_REQUEST);
 		}
 
 		return new ResponseEntity<String>("No content", HttpStatus.NO_CONTENT);
@@ -920,12 +923,13 @@ public class KnoxController {
 	public Map<String, Object> goldbarGenerator(@RequestParam(value = "inputCSVFiles[]", required = true) List<MultipartFile> inputCSVFiles, 
 			@RequestParam(value = "rules", required = false) String rules, 
 			@RequestParam(value = "lengths", required = false) String lengths,
-			@RequestParam(value = "outputSpacePrefix", required = false) String OutputSpacePrefix,
+			@RequestParam(value = "outputSpacePrefix", required = false) String outputSpacePrefix,
+			@RequestParam(value = "groupID", required = false) String groupID,
 			@RequestParam(value = "verify", required = false, defaultValue="true") Boolean verify,
 			@RequestParam(value = "direction", required = false, defaultValue="true") String direction,
 			@RequestParam(value = "verbose", required = false, defaultValue="false") Boolean verbose) {
 		
-		System.out.println("Starting GOLDBAR Generator");
+		System.out.println("\nStarting GOLDBAR Generator");
 		try {
 			InputStream inputCSVStream = inputCSVFiles.get(0).getInputStream();
 
@@ -935,14 +939,14 @@ public class KnoxController {
 
 			if (lengths.equals("")) {
 				ArrayList<String> emptyList = new ArrayList<String>();
-				return designSpaceService.goldbarGeneration(rulesList, inputCSVStream, emptyList, OutputSpacePrefix, verify, direction, verbose);
+				return designSpaceService.goldbarGeneration(rulesList, inputCSVStream, emptyList, outputSpacePrefix, groupID, verify, direction, verbose);
 			} 
 
 			String[] lengthsArray = lengths.split(",");
 			ArrayList<String> lengthsList = new ArrayList<>(Arrays.asList(lengthsArray));
 			System.out.println("Lengths" + lengthsList);
 			
-			return designSpaceService.goldbarGeneration(rulesList, inputCSVStream, lengthsList, OutputSpacePrefix, verify, direction, verbose);
+			return designSpaceService.goldbarGeneration(rulesList, inputCSVStream, lengthsList, outputSpacePrefix, groupID, verify, direction, verbose);
 		} catch (IOException e) {
 			e.printStackTrace();
 		}
@@ -994,6 +998,11 @@ public class KnoxController {
 		}
 
 		return designSpaceService.ruleEvaluation(evaluationName, designSpaceIDs, rulesGroupID, designLabels, designScores, labelingMethod);
+	}
+
+	@GetMapping("/rule/listEvaluations")
+	public Set<String> listRuleEvaluations() {
+		return designSpaceService.listRuleEvaluations();
 	}
 
 	@GetMapping("/rule/getEvaluation")
@@ -1093,20 +1102,21 @@ public class KnoxController {
 
     @GetMapping("/designSpace/list")
     public List<String> listDesignSpaces() {
+		//System.out.println("\nLIST DESIGN SPACES:\n");
         return designSpaceService.listDesignSpaces();
     }
 
 	@GetMapping("/designSpace/listGroupSpaces")
     public List<String> listGroupSpaceIDs(@RequestParam(value = "groupID", required = true) String groupID) {
-		System.out.println("\nLIST SPACES FROM GROUP:\n");
+		//System.out.println("\nLIST SPACES FROM GROUP:\n");
         return designSpaceService.getGroupSpaceIDs(groupID);
     }
 
 	@GetMapping("/designSpace/listUniqueGroups")
     public List<String> listUniqueGroupIDs() {
-		System.out.println("\nLIST GROUP IDS:\n");
+		//System.out.println("\nLIST GROUP IDS:\n");
 		List<String> groupIDs = designSpaceService.getUniqueGroupIDs();
-		System.out.println(groupIDs);
+		//System.out.println(groupIDs);
         return groupIDs;
     }
 
